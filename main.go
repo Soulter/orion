@@ -7,6 +7,9 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -24,6 +27,8 @@ const (
 	defaultBindAddr      = "0.0.0.0"
 	defaultServerPort    = 38398
 	defaultVHostHTTPPort = 38397
+	pairJoinTimeout      = 3 * time.Second
+	statusProbeTimeout   = 3 * time.Second
 	configFileName       = "config.json"
 	stateFileName        = "services.json"
 	frpcFileName         = "frpc.toml"
@@ -94,6 +99,45 @@ type pairingToken struct {
 	ServerAddr string `json:"server_addr"`
 	ServerPort int    `json:"server_port"`
 	AuthToken  string `json:"auth_token"`
+}
+
+var dialServer = func(address string, timeout time.Duration) error {
+	conn, err := net.DialTimeout("tcp", address, timeout)
+	if err != nil {
+		return err
+	}
+	return conn.Close()
+}
+
+var probePublicEndpoint = func(domain string, timeout time.Duration) error {
+	client := &http.Client{
+		Timeout: timeout,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+
+	req, err := http.NewRequest(http.MethodHead, "https://"+domain, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := client.Do(req)
+	if err == nil {
+		_ = resp.Body.Close()
+		return nil
+	}
+
+	req, err = http.NewRequest(http.MethodGet, "https://"+domain, nil)
+	if err != nil {
+		return err
+	}
+	resp, err = client.Do(req)
+	if err != nil {
+		return err
+	}
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1024))
+	_ = resp.Body.Close()
+	return nil
 }
 
 func main() {
@@ -211,18 +255,7 @@ func runServe(args []string) (int, error) {
 
 	waitErr := cmd.Wait()
 	exitCode := exitCodeFromError(waitErr)
-	record.PID = 0
-	record.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-
-	if exitCode == 0 {
-		record.Status = "stopped"
-		record.LastExitCode = nil
-	} else {
-		record.Status = "exited"
-		record.LastExitCode = intPtr(exitCode)
-	}
-
-	if err := updateService(record); err != nil {
+	if err := deregisterService(record.Name); err != nil {
 		return exitCode, err
 	}
 
@@ -233,6 +266,10 @@ func runServe(args []string) (int, error) {
 }
 
 func runList() error {
+	cfg, err := loadConfig()
+	if err != nil {
+		return err
+	}
 	state, err := loadState()
 	if err != nil {
 		return err
@@ -265,6 +302,11 @@ func runList() error {
 		return records[i].Name < records[j].Name
 	})
 
+	frpsStatus := "not-paired"
+	if strings.TrimSpace(cfg.ServerAddr) != "" && cfg.ServerPort > 0 {
+		frpsStatus = probeFRPSConnectivity(cfg.ServerAddr, cfg.ServerPort)
+	}
+
 	fmt.Println("PROCESS\tSTATUS\tPID\tCONFIG\tLOG")
 	fmt.Printf(
 		"frpc\t%s\t%s\t%s\t%s\n",
@@ -289,13 +331,15 @@ func runList() error {
 
 	fmt.Println()
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tSTATUS\tPORT\tDOMAIN\tCONFIG")
+	fmt.Fprintln(tw, "NAME\tSTATUS\tFRPS\tPUBLIC\tPORT\tDOMAIN\tCONFIG")
 	for _, record := range records {
 		fmt.Fprintf(
 			tw,
-			"%s\t%s\t%d\t%s\t%s\n",
+			"%s\t%s\t%s\t%s\t%d\t%s\t%s\n",
 			record.Name,
 			displayServiceStatus(record),
+			frpsStatus,
+			probePublicStatus(record.Domain),
 			record.Port,
 			record.Domain,
 			record.ConfigPath,
@@ -549,6 +593,9 @@ func runPairJoin(raw string) error {
 	if strings.TrimSpace(token.AuthToken) == "" {
 		return errors.New("pair token is missing auth_token")
 	}
+	if err := verifyPairConnectivity(token); err != nil {
+		return err
+	}
 
 	cfg, err := loadConfig()
 	if err != nil {
@@ -577,6 +624,32 @@ func runPairJoin(raw string) error {
 
 	fmt.Printf("paired to %s:%d for *.%s\n", cfg.ServerAddr, cfg.ServerPort, cfg.BaseDomain)
 	return nil
+}
+
+func verifyPairConnectivity(token pairingToken) error {
+	address := net.JoinHostPort(token.ServerAddr, strconv.Itoa(token.ServerPort))
+	if err := dialServer(address, pairJoinTimeout); err != nil {
+		return fmt.Errorf("pair preflight failed: cannot connect to %s: %w", address, err)
+	}
+	return nil
+}
+
+func probeFRPSConnectivity(serverAddr string, serverPort int) string {
+	address := net.JoinHostPort(serverAddr, strconv.Itoa(serverPort))
+	if err := dialServer(address, statusProbeTimeout); err != nil {
+		return "down"
+	}
+	return "ok"
+}
+
+func probePublicStatus(domain string) string {
+	if strings.TrimSpace(domain) == "" {
+		return "unknown"
+	}
+	if err := probePublicEndpoint(domain, statusProbeTimeout); err != nil {
+		return "down"
+	}
+	return "ok"
 }
 
 func parseServiceFlags(command string, args []string) (serviceOptions, error) {
@@ -690,7 +763,36 @@ func syncClientConfigAndProcess(cfg appConfig, state serviceState) error {
 	if err := writeFRPCConfigFromState(cfg, state); err != nil {
 		return err
 	}
+	if len(state.Services) == 0 {
+		if err := stopManagedProcess(state.FRPC); err != nil {
+			return err
+		}
+		return saveState(state)
+	}
 	return restartFRPC(cfg, state)
+}
+
+func deregisterService(name string) error {
+	state, err := loadState()
+	if err != nil {
+		return err
+	}
+	if state.Services == nil {
+		state.Services = make(map[string]*serviceRecord)
+	}
+	if _, ok := state.Services[name]; !ok {
+		return nil
+	}
+	delete(state.Services, name)
+
+	cfg, err := loadConfig()
+	if err != nil {
+		return err
+	}
+	if !isClientConfigured(cfg) {
+		return saveState(state)
+	}
+	return syncClientConfigAndProcess(cfg, state)
 }
 
 func updateService(record *serviceRecord) error {

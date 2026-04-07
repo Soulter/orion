@@ -18,7 +18,9 @@ orion list
 
 `orion pair join` stores the server connection in `~/.orion/config.json`.
 
-`orion up` and `orion serve` rewrite `~/.orion/frpc.toml` and start or restart the bundled `frpc`.
+`orion up` and `orion serve` rewrite `~/.orion/frpc.toml` and start or restart the bundled `frpc`. `orion serve` removes its proxy entry again when the served process exits.
+
+`orion list` shows both control-plane reachability to `frps` and public reachability to each exposed service domain.
 
 The generated client config looks like:
 

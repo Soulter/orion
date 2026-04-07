@@ -1,12 +1,16 @@
 package main
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestSlugifyName(t *testing.T) {
@@ -201,4 +205,228 @@ func TestValidateServiceConflicts(t *testing.T) {
 	if err := validateServiceConflicts(state, "b", "other", 3000); err == nil {
 		t.Fatal("expected port conflict")
 	}
+}
+
+func TestDeregisterServiceRemovesProxyConfig(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	cfg := appConfig{
+		BaseDomain: "edge.soulter.top",
+		ServerAddr: "frps.edge.soulter.top",
+		ServerPort: 38398,
+		AuthToken:  "token",
+	}
+	if err := saveConfig(cfg); err != nil {
+		t.Fatalf("saveConfig returned error: %v", err)
+	}
+
+	state := serviceState{
+		Services: map[string]*serviceRecord{
+			"demo": {
+				Name:       "demo",
+				Slug:       "demo",
+				Port:       38399,
+				Domain:     "demo.edge.soulter.top",
+				ConfigPath: filepath.Join(home, ".orion", "frpc.toml"),
+				Status:     "running",
+			},
+		},
+	}
+	if err := saveState(state); err != nil {
+		t.Fatalf("saveState returned error: %v", err)
+	}
+	if err := writeFRPCConfigFromState(cfg, state); err != nil {
+		t.Fatalf("writeFRPCConfigFromState returned error: %v", err)
+	}
+
+	if err := deregisterService("demo"); err != nil {
+		t.Fatalf("deregisterService returned error: %v", err)
+	}
+
+	updatedState, err := loadState()
+	if err != nil {
+		t.Fatalf("loadState returned error: %v", err)
+	}
+	if len(updatedState.Services) != 0 {
+		t.Fatalf("expected no services after deregister, got %+v", updatedState.Services)
+	}
+
+	frpcPath, err := frpcConfigPath()
+	if err != nil {
+		t.Fatalf("frpcConfigPath returned error: %v", err)
+	}
+	content, err := os.ReadFile(frpcPath)
+	if err != nil {
+		t.Fatalf("os.ReadFile returned error: %v", err)
+	}
+	if strings.Contains(string(content), "name = \"demo\"") {
+		t.Fatalf("proxy config still contains deregistered service: %s", string(content))
+	}
+	if !strings.Contains(string(content), "serverAddr = \"frps.edge.soulter.top\"") {
+		t.Fatalf("frpc header unexpectedly missing: %s", string(content))
+	}
+}
+
+func TestRunPairJoinRequiresConnectivitySuccess(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	oldDialServer := dialServer
+	dialServer = func(address string, timeout time.Duration) error {
+		if address != "frps.edge.soulter.top:38398" {
+			t.Fatalf("unexpected dial address: %s", address)
+		}
+		return nil
+	}
+	t.Cleanup(func() {
+		dialServer = oldDialServer
+	})
+
+	raw, err := encodePairingToken(appConfig{
+		BaseDomain: "edge.soulter.top",
+		ServerAddr: "frps.edge.soulter.top",
+		ServerPort: 38398,
+		AuthToken:  "token",
+	})
+	if err != nil {
+		t.Fatalf("encodePairingToken returned error: %v", err)
+	}
+
+	if err := runPairJoin(raw); err != nil {
+		t.Fatalf("runPairJoin returned error: %v", err)
+	}
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatalf("loadConfig returned error: %v", err)
+	}
+	if cfg.ServerAddr != "frps.edge.soulter.top" || cfg.ServerPort != 38398 || cfg.BaseDomain != "edge.soulter.top" {
+		t.Fatalf("unexpected config after pair join: %+v", cfg)
+	}
+}
+
+func TestRunPairJoinFailsBeforeWritingConfigWhenConnectivityFails(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	oldDialServer := dialServer
+	dialServer = func(address string, timeout time.Duration) error {
+		return errors.New("connection refused")
+	}
+	t.Cleanup(func() {
+		dialServer = oldDialServer
+	})
+
+	raw, err := encodePairingToken(appConfig{
+		BaseDomain: "edge.soulter.top",
+		ServerAddr: "frps.edge.soulter.top",
+		ServerPort: 38398,
+		AuthToken:  "token",
+	})
+	if err != nil {
+		t.Fatalf("encodePairingToken returned error: %v", err)
+	}
+
+	err = runPairJoin(raw)
+	if err == nil {
+		t.Fatal("expected runPairJoin to fail")
+	}
+	if !strings.Contains(err.Error(), "pair preflight failed") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatalf("loadConfig returned error: %v", err)
+	}
+	if cfg.ServerAddr != "" || cfg.ServerPort != 0 || cfg.BaseDomain != "" || cfg.AuthToken != "" {
+		t.Fatalf("config should not be written on failed preflight: %+v", cfg)
+	}
+}
+
+func TestRunListIncludesConnectivityStatus(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	cfg := appConfig{
+		BaseDomain: "edge.soulter.top",
+		ServerAddr: "frps.edge.soulter.top",
+		ServerPort: 38398,
+		AuthToken:  "token",
+	}
+	if err := saveConfig(cfg); err != nil {
+		t.Fatalf("saveConfig returned error: %v", err)
+	}
+
+	state := serviceState{
+		Services: map[string]*serviceRecord{
+			"demo": {
+				Name:       "demo",
+				Slug:       "demo",
+				Port:       38399,
+				Domain:     "demo.edge.soulter.top",
+				ConfigPath: filepath.Join(home, ".orion", "frpc.toml"),
+				Status:     "registered",
+			},
+		},
+	}
+	if err := saveState(state); err != nil {
+		t.Fatalf("saveState returned error: %v", err)
+	}
+
+	oldDialServer := dialServer
+	dialServer = func(address string, timeout time.Duration) error {
+		if address != "frps.edge.soulter.top:38398" {
+			t.Fatalf("unexpected dial address: %s", address)
+		}
+		return nil
+	}
+	t.Cleanup(func() {
+		dialServer = oldDialServer
+	})
+
+	oldProbe := probePublicEndpoint
+	probePublicEndpoint = func(domain string, timeout time.Duration) error {
+		if domain != "demo.edge.soulter.top" {
+			t.Fatalf("unexpected domain probe: %s", domain)
+		}
+		return nil
+	}
+	t.Cleanup(func() {
+		probePublicEndpoint = oldProbe
+	})
+
+	output, err := captureStdout(runList)
+	if err != nil {
+		t.Fatalf("captureStdout returned error: %v", err)
+	}
+	if !strings.Contains(output, "FRPS") || !strings.Contains(output, "PUBLIC") {
+		t.Fatalf("missing connectivity headers: %s", output)
+	}
+	if !strings.Contains(output, "demo") || !strings.Contains(output, "ok") {
+		t.Fatalf("missing service connectivity output: %s", output)
+	}
+}
+
+func captureStdout(fn func() error) (string, error) {
+	oldStdout := os.Stdout
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		return "", err
+	}
+	os.Stdout = writer
+
+	runErr := fn()
+
+	_ = writer.Close()
+	os.Stdout = oldStdout
+
+	var buf bytes.Buffer
+	if _, err := io.Copy(&buf, reader); err != nil {
+		return "", err
+	}
+	_ = reader.Close()
+
+	return buf.String(), runErr
 }
