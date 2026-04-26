@@ -101,6 +101,7 @@ orion server stop
 orion pair show
 orion pair join <token>
 orion up -n my_service -p 8000
+orion down -n my_service
 orion serve -n my_service -p 8000 -- ./your_service
 orion list
 ```
@@ -119,7 +120,7 @@ orion list
 
 `orion pair show` prints the current pairing token from the server-side config.
 
-`orion up` and `orion serve` rewrite `~/.orion/frpc.toml` and start or restart the bundled `frpc`. `orion serve` removes its proxy entry again when the served process exits.
+`orion up` and `orion serve` rewrite `~/.orion/frpc.toml` and start or restart the bundled `frpc`. `orion down` removes a registered proxy entry and updates `frpc`. `orion serve` removes its proxy entry again when the served process exits.
 
 `orion list` shows both control-plane reachability to `frps` and public reachability to each exposed service domain.
 

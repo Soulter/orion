@@ -268,6 +268,57 @@ func TestDeregisterServiceRemovesProxyConfig(t *testing.T) {
 	}
 }
 
+func TestRunDownDeregistersService(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	state := serviceState{
+		Services: map[string]*serviceRecord{
+			"demo": {
+				Name:      "demo",
+				Slug:      "demo",
+				Port:      38399,
+				Domain:    "demo.edge.soulter.top",
+				Status:    "registered",
+				UpdatedAt: time.Now().UTC().Format(time.RFC3339),
+			},
+		},
+	}
+	if err := saveState(state); err != nil {
+		t.Fatalf("saveState returned error: %v", err)
+	}
+
+	output, err := captureStdout(func() error {
+		return runDown([]string{"-n", "demo"})
+	})
+	if err != nil {
+		t.Fatalf("runDown returned error: %v", err)
+	}
+	if !strings.Contains(output, "deregistered demo") {
+		t.Fatalf("unexpected output: %s", output)
+	}
+
+	updatedState, err := loadState()
+	if err != nil {
+		t.Fatalf("loadState returned error: %v", err)
+	}
+	if len(updatedState.Services) != 0 {
+		t.Fatalf("expected no services after down, got %+v", updatedState.Services)
+	}
+}
+
+func TestRunDownRequiresServiceName(t *testing.T) {
+	t.Parallel()
+
+	err := runDown(nil)
+	if err == nil {
+		t.Fatal("expected runDown to fail without -n")
+	}
+	if !strings.Contains(err.Error(), "missing required -n service name") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestRunPairJoinRequiresConnectivitySuccess(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

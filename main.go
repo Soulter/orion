@@ -156,6 +156,11 @@ func run(args []string) int {
 			return printError(err)
 		}
 		return 0
+	case "down":
+		if err := runDown(args[1:]); err != nil {
+			return printError(err)
+		}
+		return 0
 	case "serve":
 		code, err := runServe(args[1:])
 		if err != nil {
@@ -202,6 +207,18 @@ func runUp(args []string) error {
 	}
 
 	fmt.Printf("registered %s -> https://%s\n", record.Name, record.Domain)
+	return nil
+}
+
+func runDown(args []string) error {
+	name, err := parseServiceNameFlags("down", args)
+	if err != nil {
+		return err
+	}
+	if err := deregisterService(name); err != nil {
+		return err
+	}
+	fmt.Printf("deregistered %s\n", name)
 	return nil
 }
 
@@ -676,6 +693,25 @@ func parseServiceFlags(command string, args []string) (serviceOptions, error) {
 	}
 	opts.command = rest
 	return opts, nil
+}
+
+func parseServiceNameFlags(command string, args []string) (string, error) {
+	fs := flag.NewFlagSet(command, flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+
+	var name string
+	fs.StringVar(&name, "n", "", "service name")
+	if err := fs.Parse(args); err != nil {
+		return "", err
+	}
+	if fs.NArg() != 0 {
+		return "", fmt.Errorf("usage: orion %s -n <service>", command)
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "", errors.New("missing required -n service name")
+	}
+	return name, nil
 }
 
 func parseServerStartFlags(args []string) (serverStartOptions, error) {
@@ -1393,6 +1429,7 @@ Usage:
   orion pair show
   orion pair join <token>
   orion up -n my_service -p 7000
+  orion down -n my_service
   orion serve -n my_service -p 7000 -- your_service_script
   orion list
 
