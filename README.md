@@ -63,7 +63,7 @@ orion pair join <token>
 **Method 1: Persistant service**:
 
 ```bash
-orion up -n my_service -p 8000
+orion up -n my_service -p 8000 --http_user me --http_password secret
 ```
 
 This rewrites `~/.orion/frpc.toml`, starts or restarts the bundled `frpc`, and exposes:
@@ -73,7 +73,7 @@ This rewrites `~/.orion/frpc.toml`, starts or restarts the bundled `frpc`, and e
 **Method 2: Temporary process-bound service**
 
 ```bash
-orion serve -n my_service -p 8000 -- ./your_service
+orion serve -n my_service -p 8000 --http_user me --http_password secret -- ./your_service
 ```
 
 This keeps the terminal attached to your process and removes the proxy entry again when the served process exits.
@@ -100,9 +100,9 @@ orion server status
 orion server stop
 orion pair show
 orion pair join <token>
-orion up -n my_service -p 8000
+orion up -n my_service -p 8000 [--http_user user --http_password password]
 orion down -n my_service
-orion serve -n my_service -p 8000 -- ./your_service
+orion serve -n my_service -p 8000 [--http_user user --http_password password] -- ./your_service
 orion list
 ```
 
@@ -120,7 +120,7 @@ orion list
 
 `orion pair show` prints the current pairing token from the server-side config.
 
-`orion up` and `orion serve` rewrite `~/.orion/frpc.toml` and start or restart the bundled `frpc`. `orion down` removes a registered proxy entry and updates `frpc`. `orion serve` removes its proxy entry again when the served process exits.
+`orion up` and `orion serve` rewrite `~/.orion/frpc.toml` and start or restart the bundled `frpc`. Add `--http_user` and `--http_password` together to enable frp HTTP Basic Auth for that service. `orion down` removes a registered proxy entry and updates `frpc`. `orion serve` removes its proxy entry again when the served process exits.
 
 `orion list` shows both control-plane reachability to `frps` and public reachability to each exposed service domain.
 

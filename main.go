@@ -55,6 +55,8 @@ type serviceRecord struct {
 	Slug         string   `json:"slug"`
 	Port         int      `json:"port"`
 	Domain       string   `json:"domain"`
+	HTTPUser     string   `json:"http_user,omitempty"`
+	HTTPPassword string   `json:"http_password,omitempty"`
 	ConfigPath   string   `json:"config_path"`
 	Status       string   `json:"status"`
 	PID          int      `json:"pid,omitempty"`
@@ -74,16 +76,20 @@ type processRecord struct {
 }
 
 type proxySpec struct {
-	Name       string
-	LocalIP    string
-	LocalPort  int
-	CustomHost string
+	Name         string
+	LocalIP      string
+	LocalPort    int
+	CustomHost   string
+	HTTPUser     string
+	HTTPPassword string
 }
 
 type serviceOptions struct {
-	name    string
-	port    int
-	command []string
+	name         string
+	port         int
+	httpUser     string
+	httpPassword string
+	command      []string
 }
 
 type serverStartOptions struct {
@@ -201,7 +207,7 @@ func runUp(args []string) error {
 		return err
 	}
 
-	record, err := registerService(opts.name, opts.port)
+	record, err := registerService(opts)
 	if err != nil {
 		return err
 	}
@@ -231,7 +237,7 @@ func runServe(args []string) (int, error) {
 		return 1, errors.New("serve requires a command after --")
 	}
 
-	record, err := registerService(opts.name, opts.port)
+	record, err := registerService(opts)
 	if err != nil {
 		return 1, err
 	}
@@ -676,6 +682,8 @@ func parseServiceFlags(command string, args []string) (serviceOptions, error) {
 	var opts serviceOptions
 	fs.StringVar(&opts.name, "n", "", "service name")
 	fs.IntVar(&opts.port, "p", 0, "local port")
+	fs.StringVar(&opts.httpUser, "http_user", "", "HTTP Basic Auth username")
+	fs.StringVar(&opts.httpPassword, "http_password", "", "HTTP Basic Auth password")
 
 	if err := fs.Parse(args); err != nil {
 		return opts, err
@@ -685,6 +693,9 @@ func parseServiceFlags(command string, args []string) (serviceOptions, error) {
 	}
 	if opts.port <= 0 || opts.port > 65535 {
 		return opts, errors.New("missing or invalid -p local port")
+	}
+	if (opts.httpUser == "") != (opts.httpPassword == "") {
+		return opts, errors.New("--http_user and --http_password must be provided together")
 	}
 
 	rest := fs.Args()
@@ -739,7 +750,7 @@ func parseServerStartFlags(args []string) (serverStartOptions, error) {
 	return opts, nil
 }
 
-func registerService(name string, port int) (*serviceRecord, error) {
+func registerService(opts serviceOptions) (*serviceRecord, error) {
 	cfg, err := loadConfig()
 	if err != nil {
 		return nil, err
@@ -748,7 +759,7 @@ func registerService(name string, port int) (*serviceRecord, error) {
 		return nil, errors.New("client is not paired; run: orion pair join <token>")
 	}
 
-	slug, err := slugifyName(name)
+	slug, err := slugifyName(opts.name)
 	if err != nil {
 		return nil, err
 	}
@@ -757,7 +768,7 @@ func registerService(name string, port int) (*serviceRecord, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := validateServiceConflicts(state, name, slug, port); err != nil {
+	if err := validateServiceConflicts(state, opts.name, slug, opts.port); err != nil {
 		return nil, err
 	}
 
@@ -767,17 +778,19 @@ func registerService(name string, port int) (*serviceRecord, error) {
 	}
 	domain := slug + "." + cfg.BaseDomain
 
-	record, ok := state.Services[name]
+	record, ok := state.Services[opts.name]
 	if !ok || record == nil {
-		record = &serviceRecord{Name: name}
-		state.Services[name] = record
+		record = &serviceRecord{Name: opts.name}
+		state.Services[opts.name] = record
 	}
 
 	running := record.Status == "running" && record.PID > 0 && processExists(record.PID)
-	record.Name = name
+	record.Name = opts.name
 	record.Slug = slug
-	record.Port = port
+	record.Port = opts.port
 	record.Domain = domain
+	record.HTTPUser = opts.httpUser
+	record.HTTPPassword = opts.httpPassword
 	record.ConfigPath = frpcPath
 	record.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 	if !running {
@@ -871,10 +884,12 @@ func writeFRPCConfigFromState(cfg appConfig, state serviceState) error {
 			continue
 		}
 		proxies = append(proxies, proxySpec{
-			Name:       record.Name,
-			LocalIP:    defaultLocalIP,
-			LocalPort:  record.Port,
-			CustomHost: record.Domain,
+			Name:         record.Name,
+			LocalIP:      defaultLocalIP,
+			LocalPort:    record.Port,
+			CustomHost:   record.Domain,
+			HTTPUser:     record.HTTPUser,
+			HTTPPassword: record.HTTPPassword,
 		})
 	}
 	sort.Slice(proxies, func(i, j int) bool {
@@ -1027,7 +1042,9 @@ func renderFRPSConfig(cfg appConfig, opts serverStartOptions) string {
 }
 
 func renderProxyBlock(spec proxySpec) string {
-	return fmt.Sprintf(
+	var builder strings.Builder
+	fmt.Fprintf(
+		&builder,
 		"[[proxies]]\nname = %q\ntype = %q\nlocalIP = %q\nlocalPort = %d\ncustomDomains = [%q]\n",
 		spec.Name,
 		"http",
@@ -1035,6 +1052,11 @@ func renderProxyBlock(spec proxySpec) string {
 		spec.LocalPort,
 		spec.CustomHost,
 	)
+	if spec.HTTPUser != "" && spec.HTTPPassword != "" {
+		fmt.Fprintf(&builder, "httpUser = %q\n", spec.HTTPUser)
+		fmt.Fprintf(&builder, "httpPassword = %q\n", spec.HTTPPassword)
+	}
+	return builder.String()
 }
 
 func encodePairingToken(cfg appConfig) (string, error) {
@@ -1428,9 +1450,9 @@ Usage:
   orion server stop
   orion pair show
   orion pair join <token>
-  orion up -n my_service -p 7000
+  orion up -n my_service -p 7000 [--http_user user --http_password password]
   orion down -n my_service
-  orion serve -n my_service -p 7000 -- your_service_script
+  orion serve -n my_service -p 7000 [--http_user user --http_password password] -- your_service_script
   orion list
 
 Notes:

@@ -89,15 +89,55 @@ func TestRenderProxyBlock(t *testing.T) {
 	}
 }
 
+func TestRenderProxyBlockWithHTTPBasicAuth(t *testing.T) {
+	t.Parallel()
+
+	block := renderProxyBlock(proxySpec{
+		Name:         "llamacpp",
+		LocalIP:      "127.0.0.1",
+		LocalPort:    38399,
+		CustomHost:   "llamacpp.edge.soulter.top",
+		HTTPUser:     "alice",
+		HTTPPassword: "secret",
+	})
+
+	if !strings.Contains(block, "httpUser = \"alice\"") {
+		t.Fatalf("proxy block missing httpUser: %s", block)
+	}
+	if !strings.Contains(block, "httpPassword = \"secret\"") {
+		t.Fatalf("proxy block missing httpPassword: %s", block)
+	}
+}
+
 func TestParseServiceFlagsWithoutConfig(t *testing.T) {
 	t.Parallel()
 
-	opts, err := parseServiceFlags("up", []string{"-n", "llamacpp", "-p", "38399"})
+	opts, err := parseServiceFlags("up", []string{
+		"-n", "llamacpp",
+		"-p", "38399",
+		"--http_user", "alice",
+		"--http_password", "secret",
+	})
 	if err != nil {
 		t.Fatalf("parseServiceFlags returned error: %v", err)
 	}
 	if opts.name != "llamacpp" || opts.port != 38399 {
 		t.Fatalf("unexpected options: %+v", opts)
+	}
+	if opts.httpUser != "alice" || opts.httpPassword != "secret" {
+		t.Fatalf("unexpected HTTP auth options: %+v", opts)
+	}
+}
+
+func TestParseServiceFlagsRequiresHTTPUserAndPasswordTogether(t *testing.T) {
+	t.Parallel()
+
+	_, err := parseServiceFlags("up", []string{"-n", "llamacpp", "-p", "38399", "--http_user", "alice"})
+	if err == nil {
+		t.Fatal("expected parseServiceFlags to fail")
+	}
+	if !strings.Contains(err.Error(), "--http_user and --http_password must be provided together") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
